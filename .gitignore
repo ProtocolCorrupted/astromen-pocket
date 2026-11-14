@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.data/
+.env
+.env.*
+!.env.example
+.client-env/
+ios/App/Pods/
+ios/App/build/
+ios/App/App.xcworkspace/xcuserdata/
+*.ipa
+*.p12
+*.mobileprovision
