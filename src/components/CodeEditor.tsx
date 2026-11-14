@@ -10,17 +10,17 @@ import { html } from '@codemirror/lang-html';
 import { css } from '@codemirror/lang-css';
 
 const theme = EditorView.theme({
-  '&': { height: '100%', backgroundColor: 'transparent', color: '#d1d8d1', fontSize: '13px' },
-  '.cm-content': { fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace', padding: '24px 0', caretColor: '#d4ef8a' },
-  '.cm-line': { padding: '0 24px', lineHeight: '1.9' },
-  '.cm-gutters': { background: 'transparent', border: 'none', color: '#66716a', paddingLeft: '12px' },
+  '&': { height: '100%', backgroundColor: 'transparent', color: '#d1d8d1', fontSize: '16px' },
+  '.cm-content': { fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace', padding: '20px 0', caretColor: '#d4ef8a', fontSize: '16px', WebkitUserSelect: 'text', userSelect: 'text' },
+  '.cm-line': { padding: '0 20px', lineHeight: '1.75', fontSize: '13.5px' },
+  '.cm-gutters': { background: 'transparent', border: 'none', color: '#66716a', paddingLeft: '12px', fontSize: '12px', WebkitUserSelect: 'none', userSelect: 'none' },
   '.cm-activeLine': { backgroundColor: '#ffffff03' },
   '.cm-activeLineGutter': { backgroundColor: 'transparent', color: '#d4ef8a' },
   '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': { background: '#d4ef8a26' },
   '.cm-cursor': { borderLeftColor: '#d4ef8a' },
   '.cm-panels': { backgroundColor: '#202622', color: '#e1e6de' },
   '&.cm-focused': { outline: 'none' },
-  '.cm-search input': { color: '#e1e6de', background: '#121713' },
+  '.cm-search input': { color: '#e1e6de', background: '#121713', fontSize: '16px' },
 }, { dark: true });
 const highlight = HighlightStyle.define([
   { tag: tags.keyword, color: '#c7b5e8' }, { tag: [tags.string, tags.attributeValue], color: '#c9dc9f' },
