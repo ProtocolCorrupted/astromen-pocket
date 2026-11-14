@@ -6,7 +6,7 @@ import Modal from './components/Modal';
 import { addFile, applyProposal, contextMessages, createProject, safePath, uid } from './core/sandbox.mjs';
 import { listProjects, removeProject, saveProject } from './core/storage';
 import { exportProject, importProject } from './core/archive';
-import { getStatus, streamChat } from './core/api';
+import { getStatus, native, streamChat } from './core/api';
 import type { Connection, Message, Project, SourceFile, Status } from './types';
 
 export default function App() {
@@ -14,7 +14,7 @@ export default function App() {
   const [page, setPage] = useState('projects'), [selected, setSelected] = useState(''), [activePath, setActivePath] = useState('');
   const [dialog, setDialog] = useState<'new' | 'delete' | 'rename' | null>(null), [target, setTarget] = useState<Project | null>(null), [name, setName] = useState(''), [template, setTemplate] = useState('web'), [formError, setFormError] = useState('');
   const [query, setQuery] = useState(''), [toast, setToast] = useState(''), [saved, setSaved] = useState('Saved on device');
-  const [connection, setConnection] = useState<Connection>({ url: localStorage.getItem('pocket-gateway-url') || '', token: '' }), [status, setStatus] = useState<Status | null>(null), [connectionError, setConnectionError] = useState(''), [checking, setChecking] = useState(false);
+  const [connection, setConnection] = useState<Connection>({ url: localStorage.getItem('pocket-gateway-url') || (native ? 'https://coarena.ai/api/v1' : ''), token: localStorage.getItem('pocket-gateway-token') || '' }), [status, setStatus] = useState<Status | null>(null), [connectionError, setConnectionError] = useState(''), [checking, setChecking] = useState(false);
   const [model, setModel] = useState('gemini-4-carbon'), [scope, setScope] = useState('project'), [effort, setEffort] = useState('high'), [busy, setBusy] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null), controller = useRef<AbortController>(), current = useRef(projects), writeQueue = useRef(Promise.resolve());
   current.current = projects;
@@ -31,7 +31,7 @@ export default function App() {
   const addProject = async (p: Project) => { await saveProject(p); current.current = [p, ...current.current]; setProjects(current.current); return p; };
   const connect = async (next: Connection) => {
     setChecking(true); setConnectionError(''); setConnection(next); setStatus(null);
-    try { const result = await getStatus(next); setStatus(result); localStorage.setItem('pocket-gateway-url', next.url); }
+    try { const result = await getStatus(next); setStatus(result); localStorage.setItem('pocket-gateway-url', next.url); localStorage.setItem('pocket-gateway-token', next.token); }
     catch (e: any) { setConnectionError(e.message); }
     finally { setChecking(false); }
   };
