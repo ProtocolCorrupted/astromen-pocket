@@ -24,9 +24,9 @@ export default function App() {
     setSaved('Saving…');
     writeQueue.current = writeQueue.current.catch(() => {}).then(() => saveProject(p)).then(() => { setSaved('Saved on device'); setStorageError(''); }).catch((e: Error) => { setSaved('Not saved'); setStorageError(e.message); });
   };
-  const update = (id: string, fn: (p: Project) => Project) => {
+  const update = (id: string, fn: (p: Project) => Project, save = true) => {
     const existing = current.current.find(p => p.id === id); if (!existing) return;
-    const next = fn(existing); current.current = current.current.map(p => p.id === id ? next : p); setProjects(current.current); persist(next);
+    const next = fn(existing); current.current = current.current.map(p => p.id === id ? next : p); setProjects(current.current); if (save) persist(next);
   };
   const addProject = async (p: Project) => { await saveProject(p); current.current = [p, ...current.current]; setProjects(current.current); return p; };
   const connect = async (next: Connection) => {
@@ -56,7 +56,9 @@ export default function App() {
     update(id, p => ({ ...p, messages: [...p.messages, human, answer], updatedAt: Date.now() }));
     setBusy(true); const abort = new AbortController(); controller.current = abort;
     try {
-      await streamChat(connection, { model, effort, messages }, abort.signal, (content, usage, truncated) => update(id, p => ({ ...p, messages: p.messages.map(m => m.id === assistantId ? { ...m, content, usage, truncated } : m) })));
+      const selectedModel = status?.models.find(m => m.id === model);
+      await streamChat(connection, { model, effort, messages, maxOutputTokens: selectedModel?.maxOutputTokens }, abort.signal, (content, usage, truncated) => update(id, p => ({ ...p, messages: p.messages.map(m => m.id === assistantId ? { ...m, content, usage, truncated } : m) }), false));
+      const finished = current.current.find(p => p.id === id); if (finished) persist(finished);
     } catch (e: any) {
       update(id, p => ({ ...p, messages: p.messages.map(m => m.id === assistantId ? { ...m, content: m.content + (abort.signal.aborted ? '\n\nGeneration stopped.' : `\n\n${e.message}`), status: abort.signal.aborted ? 'cancelled' : 'error' } : m) }));
     } finally { setBusy(false); controller.current = undefined; }

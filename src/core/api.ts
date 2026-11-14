@@ -4,6 +4,25 @@ import type { Connection, Model, Status } from '../types';
 
 export const native = Capacitor.isNativePlatform();
 
+declare global {
+  interface Window {
+    __pocketStreamEvent?: (event: {
+      id: string;
+      type: 'response' | 'chunk' | 'end' | 'error' | 'cancelled';
+      status?: number;
+      contentType?: string;
+      data?: string;
+      message?: string;
+    }) => void;
+    webkit?: {
+      messageHandlers?: {
+        pocketStreamStart?: { postMessage: (msg: unknown) => void };
+        pocketStreamAbort?: { postMessage: (msg: unknown) => void };
+      };
+    };
+  }
+}
+
 const SUPPORTED_MODELS = [
   { id: 'gemini-4-carbon', label: 'Gemini 4 Carbon' },
   { id: 'gemini-4-argon', label: 'Gemini 4 Argon' },
@@ -114,7 +133,6 @@ export async function getStatus(connection: Connection): Promise<Status> {
   const base = normalizeBaseUrl(connection);
   const token = connection.token.trim();
 
-  // Direct Coarena API mode (default on iOS or when using coarena.ai / coa_ key)
   if (base && isDirectCoarena(base, token)) {
     if (!token) {
       return {
@@ -135,7 +153,6 @@ export async function getStatus(connection: Connection): Promise<Status> {
     };
   }
 
-  // Local browser gateway session
   if (!native && !base) {
     const session = await fetch('/api/session', { method: 'POST', credentials: 'include' });
     if (!session.ok) throw new Error('Local gateway session could not be established.');
@@ -148,9 +165,141 @@ export async function getStatus(connection: Connection): Promise<Status> {
   return res.data;
 }
 
+const activeStreams = new Map<string, (event: any) => void>();
+if (typeof window !== 'undefined') {
+  window.__pocketStreamEvent = event => {
+    const handler = activeStreams.get(event.id);
+    if (handler) handler(event);
+  };
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+async function streamViaNativeBridge(
+  url: string,
+  reqHeaders: Record<string, string>,
+  reqBody: unknown,
+  signal: AbortSignal,
+  onChange: (text: string, usage?: any, truncated?: boolean) => void
+) {
+  const startHandler = window.webkit?.messageHandlers?.pocketStreamStart;
+  const abortHandler = window.webkit?.messageHandlers?.pocketStreamAbort;
+  if (!startHandler) {
+    throw new Error('Native streaming bridge is unavailable.');
+  }
+
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  let text = '', done = false, streamError = '', usage: any, truncated = false;
+  let status = 200;
+  let contentType = '';
+  const rawChunks: Uint8Array[] = [];
+
+  const decoder = createEventDecoder((data: string) => {
+    if (data === '[DONE]') { done = true; return; }
+    try {
+      const event = JSON.parse(data);
+      if (event.error) { streamError = event.error.message || event.error || 'Provider interrupted the response.'; return; }
+      const choice = event.choices?.[0];
+      if (typeof choice?.delta?.content === 'string') text += choice.delta.content;
+      else if (typeof choice?.message?.content === 'string') text += choice.message.content;
+      if (choice?.finish_reason === 'length') truncated = true;
+      if (event.usage) usage = event.usage;
+      onChange(text, usage, truncated);
+    } catch {
+      // Ignore non-JSON keepalive comments
+    }
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      activeStreams.delete(id);
+      signal.removeEventListener('abort', onAbort);
+    };
+    const onAbort = () => {
+      abortHandler?.postMessage({ id });
+      cleanup();
+      reject(new Error('Generation stopped.'));
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+
+    activeStreams.set(id, event => {
+      if (event.type === 'response') {
+        status = event.status || 200;
+        contentType = (event.contentType || '').toLowerCase();
+      } else if (event.type === 'chunk' && event.data) {
+        const bytes = base64ToBytes(event.data);
+        if (status >= 400 || contentType.includes('application/json')) {
+          rawChunks.push(bytes);
+        } else {
+          decoder.push(bytes);
+        }
+      } else if (event.type === 'end') {
+        cleanup();
+        if (status >= 400 || contentType.includes('application/json')) {
+          const totalLen = rawChunks.reduce((acc, c) => acc + c.length, 0);
+          const merged = new Uint8Array(totalLen);
+          let offset = 0;
+          for (const c of rawChunks) { merged.set(c, offset); offset += c.length; }
+          const bodyText = new TextDecoder().decode(merged);
+          let parsed: any = null;
+          try { parsed = JSON.parse(bodyText); } catch { /* not json */ }
+          if (status >= 400) {
+            reject(new Error(parsed?.error?.message || parsed?.error || `Provider returned HTTP ${status}.`));
+            return;
+          }
+          if (parsed?.choices) {
+            const choice = parsed.choices[0];
+            text = choice?.message?.content || choice?.delta?.content || '';
+            truncated = choice?.finish_reason === 'length';
+            usage = parsed.usage;
+            done = true;
+            onChange(text, usage, truncated);
+          } else {
+            decoder.push(merged);
+            decoder.finish();
+            done = true;
+          }
+        } else {
+          decoder.finish();
+        }
+        resolve();
+      } else if (event.type === 'cancelled') {
+        cleanup();
+        reject(new Error('Generation stopped.'));
+      } else if (event.type === 'error') {
+        cleanup();
+        reject(new Error(event.message || 'Stream connection failed.'));
+      }
+    });
+
+    startHandler.postMessage({
+      id,
+      url,
+      method: 'POST',
+      headers: reqHeaders,
+      body: JSON.stringify(reqBody),
+    });
+  });
+
+  if (streamError) throw new Error(streamError);
+  if (!done && !text.trim()) throw new Error('Connection interrupted before any response was received.');
+  if (!text.trim()) throw new Error('The model returned no answer. No automatic paid retry was made.');
+}
+
 export async function streamChat(
   connection: Connection,
-  payload: { model: string; effort: string; messages: Array<{ role: string; content: string }> },
+  payload: { model: string; effort: string; messages: Array<{ role: string; content: string }>; maxOutputTokens?: number | null },
   signal: AbortSignal,
   onChange: (text: string, usage?: any, truncated?: boolean) => void
 ) {
@@ -158,69 +307,36 @@ export async function streamChat(
   const token = connection.token.trim();
   const direct = Boolean(base && isDirectCoarena(base, token));
 
-  if (direct || native) {
-    const chatUrl = direct
-      ? (base.endsWith('/v1') ? `${base}/chat/completions` : `${base}/api/v1/chat/completions`)
-      : endpoint(connection, '/api/chat');
-    const reqBody = direct
-      ? {
-          model: payload.model,
-          messages: payload.messages,
-          reasoning_effort: payload.effort,
-          max_tokens: 16384,
-          stream: false,
-        }
-      : payload;
+  const chatUrl = direct
+    ? (base.endsWith('/v1') ? `${base}/chat/completions` : `${base}/api/v1/chat/completions`)
+    : endpoint(connection, '/api/chat');
 
-    if (signal.aborted) throw new Error('Generation stopped.');
-    const res = await httpRequest(chatUrl, 'POST', headers(connection), reqBody, false);
-    if (signal.aborted) throw new Error('Generation stopped.');
+  const reqBody = direct
+    ? {
+        model: payload.model,
+        messages: payload.messages,
+        reasoning_effort: payload.effort,
+        max_tokens: payload.maxOutputTokens || 16384,
+        stream: true,
+        stream_options: { include_usage: true },
+      }
+    : payload;
 
-    if (!res.ok) {
-      const msg = res.data?.error?.message || res.data?.error || `Provider returned HTTP ${res.status}.`;
-      throw new Error(msg);
-    }
-
-    if (typeof res.data === 'string') {
-      let text = '', streamError = '', usage: any, truncated = false;
-      const decoder = createEventDecoder((data: string) => {
-        if (data === '[DONE]') return;
-        const event = JSON.parse(data);
-        if (event.error) { streamError = event.error.message || 'Provider interrupted the response.'; return; }
-        const choice = event.choices?.[0];
-        if (typeof choice?.delta?.content === 'string') text += choice.delta.content;
-        else if (typeof choice?.message?.content === 'string') text += choice.message.content;
-        if (choice?.finish_reason === 'length') truncated = true;
-        if (event.usage) usage = event.usage;
-        onChange(text, usage, truncated);
-      });
-      decoder.push(new TextEncoder().encode(res.data));
-      decoder.finish();
-      if (streamError) throw new Error(streamError);
-      if (!text.trim()) throw new Error('The model returned no answer.');
-      return;
-    }
-
-    const choice = res.data?.choices?.[0];
-    const text = choice?.message?.content || choice?.delta?.content || '';
-    const truncated = choice?.finish_reason === 'length';
-    const usage = res.data?.usage;
-    if (!text.trim()) throw new Error('The model returned no answer. No automatic paid retry was made.');
-    onChange(text, usage, truncated);
+  if (native && window.webkit?.messageHandlers?.pocketStreamStart) {
+    await streamViaNativeBridge(chatUrl, headers(connection), reqBody, signal, onChange);
     return;
   }
 
-  // Browser streaming against local/remote gateway
-  const response = await fetch(endpoint(connection, '/api/chat'), {
+  const response = await fetch(chatUrl, {
     method: 'POST',
-    credentials: !base ? 'include' : 'omit',
+    credentials: !base && !direct ? 'include' : 'omit',
     headers: headers(connection),
-    body: JSON.stringify(payload),
+    body: JSON.stringify(reqBody),
     signal,
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(body.error || `Gateway returned ${response.status}.`);
+    throw new Error(body?.error?.message || body?.error || `Gateway returned ${response.status}.`);
   }
   if (!response.body) throw new Error('Streaming is unavailable on this connection.');
   let text = '', done = false, streamError = '', usage: any, truncated = false;
